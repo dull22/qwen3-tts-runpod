@@ -11,11 +11,8 @@ model = Qwen3TTSModel.from_pretrained(
 )
 
 def _siapkan_ref_audio(ref_audio):
-    """Kalau ref_audio berupa base64, simpan jadi file sementara dan kembalikan path-nya.
-       Kalau berupa URL (diawali http), biarkan apa adanya."""
     if ref_audio.startswith("http://") or ref_audio.startswith("https://"):
         return ref_audio, None
-    # anggap base64: decode dan tulis ke file sementara
     audio_bytes = base64.b64decode(ref_audio)
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".audio")
     tmp.write(audio_bytes)
@@ -35,24 +32,29 @@ def handler(event):
         langs = [langs] * len(texts)
 
     ref_audio_path, tmp_path = _siapkan_ref_audio(inp["ref_audio"])
+    ref_text = inp["ref_text"]
 
     try:
-        wavs, sr = model.generate_voice_clone(
-            text=texts,
-            language=langs,
+        # Ekstrak fitur suara referensi SEKALI, pakai ulang untuk semua beat
+        clone_prompt = model.create_voice_clone_prompt(
             ref_audio=ref_audio_path,
-            ref_text=inp["ref_text"],
+            ref_text=ref_text,
         )
+
+        results = []
+        # Proses satu per satu (menghindari bug batch decode)
+        for teks, lang in zip(texts, langs):
+            wavs, sr = model.generate_voice_clone(
+                text=teks,
+                language=lang,
+                voice_clone_prompt=clone_prompt,
+            )
+            buf = io.BytesIO()
+            sf.write(buf, wavs[0], sr, format="WAV")
+            results.append(base64.b64encode(buf.getvalue()).decode())
     finally:
-        # hapus file sementara kalau ada
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
-
-    results = []
-    for w in wavs:
-        buf = io.BytesIO()
-        sf.write(buf, w, sr, format="WAV")
-        results.append(base64.b64encode(buf.getvalue()).decode())
 
     return {
         "audio_base64": results if is_batch else results[0],
